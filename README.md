@@ -1,43 +1,46 @@
 # keepawake
 
-A small cross-platform CLI to keep your machine awake by periodically poking the native OS APIs.
+Cross-platform CLI to keep your machine awake by periodically pinging native OS APIs. Runs headless or via a system tray with status + Quit.
 
-## Features
-- macOS: uses `IOPMAssertionCreateWithName` (falls back to `caffeinate -du -t 60` if assertions fail).
-- Windows: calls `SetThreadExecutionState` with continuous system and display requirements.
-- Linux: runs `xdg-screensaver reset` in the background.
-- Configurable interval and duration, optional daemon mode, and debug logging.
+## Requirements
+- Rust toolchain
+- Linux: `xdg-screensaver` and (for tray mode) libappindicator/gtk runtime
+- macOS: uses `IOPMAssertionCreateWithName` and falls back to `caffeinate -du -t 60`
+- Windows: uses `SetThreadExecutionState`
 
-## Usage
+## Quick start
 ```
+# see flags
 cargo run -- --help
-```
 
-Common examples:
-```
-# Ping every 30 seconds (default) until stopped manually
-cargo run -- --interval 30
+# default: ping every 30s indefinitely
+cargo run --
 
-# Stay awake for 10 minutes, pinging every 5 seconds
+# custom interval/duration
 cargo run -- --interval 5 --duration 10
 
-# Quiet background mode
+# quiet headless
 cargo run -- --daemon
 
-# With a tray icon (menu -> Quit)
-cargo run -- --tray
+# tray mode with menu (shows interval/duration/debug + Quit)
+cargo run -- --tray --interval 15 --duration 30
 ```
 
-Options:
-- `--interval <seconds>`: call keep-awake every N seconds (default: 30, min: 1).
-- `--duration <minutes>`: stop after N minutes (min: 1). Omit to run indefinitely.
-- `--daemon`: suppress all output.
-- `--debug`: print debug pings (suppressed in daemon mode).
-- `--tray`: show a system tray icon with a Quit menu item (uses libappindicator on Linux).
+## Flags
+- `--interval <seconds>`: call keep-awake every N seconds (default: 30, min: 1)
+- `--duration <minutes>`: stop after N minutes (min: 1). Omit to run indefinitely
+- `--daemon`: suppress all output
+- `--debug`: print debug pings (suppressed in daemon mode)
+- `--tray`: show a system tray icon with status (interval, duration, debug) and a Quit item (uses libappindicator on Linux)
 
-## Building
+## Tray mode notes
+- Icon: small cup with steam; tooltip shows the current cadence (`every <interval>s`, optional duration).
+- Menu items: read-only status rows (interval, duration, debug) plus a Quit action.
+- On Linux, the icon may be hidden without libappindicator/gtk or if the desktop shell suppresses tray icons.
+
+## Build
 ```
 cargo build --release
 ```
 
-Run the resulting binary from `target/release/keepawake`. On Linux ensure `xdg-screensaver` is available. On macOS a fallback to `caffeinate` is attempted if the assertion API fails.
+Run the resulting binary from `target/release/keepawake`. On macOS the tray starts once the event loop is running; on Linux ensure `xdg-screensaver` is present or a warning is printed.
