@@ -34,9 +34,14 @@ cargo run -- --tray --interval 15 --duration 30
 - `--tray`: show a system tray icon with status (interval, duration, debug) and a Quit item (uses libappindicator on Linux)
 
 ## Tray mode notes
-- Icon: small cup with steam; tooltip shows the current cadence (`every <interval>s`, optional duration).
+- Icon: larger steaming cup rendered from `tray.svg` / `tray-animated.svg` (128px target); tooltip shows the current cadence (`every <interval>s`, optional duration).
 - Menu items: read-only status rows (interval, duration, debug) plus a Quit action.
+- Icon steam animates every ~2 seconds (using the animated SVG as reference).
 - On Linux, the icon may be hidden without libappindicator/gtk or if the desktop shell suppresses tray icons.
+
+### Customizing the tray icon
+- `tray.svg` / `tray-animated.svg` in the repo match the rendered icon (24x24 viewBox, stroked cup + steam). The app rasterizes that shape to 128px and animates the steam.
+- If you change the SVG geometry, update `build_icon_frames` in `src/tray.rs` to match your steam offsets. If SVG parsing fails, a simple fallback dot icon is used and a warning is printed (non-daemon).
 
 ## Build
 ```

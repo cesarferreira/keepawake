@@ -1,4 +1,5 @@
 use crate::{cli::Cli, platform};
+use resvg::{tiny_skia, usvg};
 use std::time::{Duration, Instant, SystemTime};
 use tao::{
     event::{Event, StartCause},
@@ -18,6 +19,9 @@ pub fn run_with_tray(args: Cli) -> ! {
         .map(|minutes| Duration::from_secs(minutes * 60));
     let start = Instant::now();
     let mut next_ping = start;
+    let steam_interval = Duration::from_secs(2);
+    let mut next_steam: Option<Instant> = None;
+    let mut steam_frame = 0usize;
 
     let menu = Menu::new();
     let status_item = MenuItem::with_id(
@@ -55,6 +59,18 @@ pub fn run_with_tray(args: Cli) -> ! {
     }
 
     let mut tray_icon: Option<TrayIcon> = None;
+    let icon_frames = match build_icon_frames() {
+        Ok(frames) => frames,
+        Err(err) => {
+            if !args.daemon {
+                eprintln!("Warning: failed to build tray icon: {err}; using fallback.");
+            }
+            vec![fallback_icon()]
+        }
+    };
+    if icon_frames.len() > 1 {
+        next_steam = Some(start + steam_interval);
+    }
 
     if !args.daemon {
         let duration_msg = match args.duration {
@@ -70,7 +86,13 @@ pub fn run_with_tray(args: Cli) -> ! {
     }
 
     event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(next_ping);
+        let mut next_wake = next_ping;
+        if let Some(steam_tick) = next_steam {
+            if steam_tick < next_wake {
+                next_wake = steam_tick;
+            }
+        }
+        *control_flow = ControlFlow::WaitUntil(next_wake);
 
         match event {
             Event::NewEvents(StartCause::Init) => {
@@ -84,6 +106,7 @@ pub fn run_with_tray(args: Cli) -> ! {
                                 .unwrap_or_default()
                         ),
                         &menu,
+                        icon_frames[0].clone(),
                     ) {
                         Ok(icon) => {
                             tray_icon = Some(icon);
@@ -121,6 +144,28 @@ pub fn run_with_tray(args: Cli) -> ! {
                     }
                 }
 
+                if let Some(steam_tick) = next_steam {
+                    if now >= steam_tick && icon_frames.len() > 1 {
+                        steam_frame = (steam_frame + 1) % icon_frames.len();
+                        if let Some(tray) = tray_icon.as_ref() {
+                            if let Err(err) = tray.set_icon(Some(icon_frames[steam_frame].clone()))
+                            {
+                                if !args.daemon {
+                                    eprintln!("Warning: failed to update tray icon: {err}");
+                                }
+                            }
+                        }
+                        next_steam = Some(now + steam_interval);
+                        let mut target = next_ping;
+                        if let Some(steam_next) = next_steam {
+                            if steam_next < target {
+                                target = steam_next;
+                            }
+                        }
+                        *control_flow = ControlFlow::WaitUntil(target);
+                    }
+                }
+
                 if now >= next_ping {
                     match platform::keep_awake() {
                         Ok(_) => {
@@ -135,7 +180,13 @@ pub fn run_with_tray(args: Cli) -> ! {
                         }
                     }
                     next_ping = now + interval;
-                    *control_flow = ControlFlow::WaitUntil(next_ping);
+                    let mut target = next_ping;
+                    if let Some(steam_tick) = next_steam {
+                        if steam_tick < target {
+                            target = steam_tick;
+                        }
+                    }
+                    *control_flow = ControlFlow::WaitUntil(target);
                 }
             }
             Event::LoopDestroyed => {
@@ -148,9 +199,7 @@ pub fn run_with_tray(args: Cli) -> ! {
     })
 }
 
-fn build_tray_icon(tooltip: String, menu: &Menu) -> Result<TrayIcon, String> {
-    let icon = build_icon()?;
-
+fn build_tray_icon(tooltip: String, menu: &Menu, icon: Icon) -> Result<TrayIcon, String> {
     TrayIconBuilder::new()
         .with_icon(icon)
         .with_tooltip(tooltip)
@@ -159,65 +208,90 @@ fn build_tray_icon(tooltip: String, menu: &Menu) -> Result<TrayIcon, String> {
         .map_err(|err| err.to_string())
 }
 
-fn build_icon() -> Result<Icon, String> {
-    let width = 64u32;
-    let height = 64u32;
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+fn build_icon_frames() -> Result<Vec<Icon>, String> {
+    let steam_frames = [
+        (3.0f32, 0.10f32),
+        (1.5f32, 0.55f32),
+        (0.0f32, 0.90f32),
+        (-1.5f32, 0.55f32),
+    ];
 
-    // start transparent
-    for _ in 0..(width * height) {
-        rgba.extend_from_slice(&[0, 0, 0, 0]);
+    let mut frames = Vec::with_capacity(steam_frames.len());
+    for (offset, opacity) in steam_frames {
+        frames.push(render_svg_frame(offset, opacity)?);
     }
 
-    let mut set_pixel = |x: i32, y: i32, color: [u8; 4]| {
-        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
-            let idx = ((y as u32 * width + x as u32) * 4) as usize;
-            rgba[idx..idx + 4].copy_from_slice(&color);
-        }
+    Ok(frames)
+}
+
+fn render_svg_frame(steam_offset: f32, steam_opacity: f32) -> Result<Icon, String> {
+    const ICON_PX: u32 = 128;
+    // These paths come from tray.svg (cup and handle) and tray-animated.svg (steam), scaled via viewBox.
+    let steam = |x: u8| -> String {
+        format!(
+            r#"<path d="M{} {:.2}v6" stroke-opacity="{:.2}" />"#,
+            x,
+            8.0f32 - steam_offset,
+            steam_opacity
+        )
     };
 
-    let cup_color = [240, 240, 240, 255];
-    let shadow_color = [200, 200, 200, 255];
-    let steam_color = [180, 180, 180, 255];
-    let saucer_color = [180, 180, 180, 255];
-    let saucer_shadow = [160, 160, 160, 255];
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f4f7ff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+  {steam1}
+  {steam2}
+  {steam3}
+  <path d="M19 11H5v5a7 7 0 0 0 14 0v-5Z" />
+  <path d="M19 13h1a2 2 0 0 1 0 4h-1" />
+</svg>"##,
+        steam1 = steam(8),
+        steam2 = steam(12),
+        steam3 = steam(16),
+    );
 
-    // cup body (scaled up)
-    for y in 26..46 {
-        for x in 16..46 {
-            set_pixel(x, y, cup_color);
-        }
-    }
-    // cup shadow line
-    for x in 16..46 {
-        set_pixel(x, 46, shadow_color);
-    }
-    // handle ring
-    for y in 27..45 {
-        for x in 44..56 {
-            let dx = x as f32 - 45.5;
-            let dy = y as f32 - 35.5;
+    render_svg_to_icon(&svg, ICON_PX)
+}
+
+fn render_svg_to_icon(svg: &str, target_size: u32) -> Result<Icon, String> {
+    let options = usvg::Options::default();
+    let mut fontdb = usvg::fontdb::Database::new();
+    fontdb.load_system_fonts();
+
+    let tree = usvg::Tree::from_str(svg, &options, &fontdb)
+        .map_err(|err| format!("failed to parse tray svg: {err}"))?;
+
+    let vb = tree.view_box().rect;
+    let scale_x = target_size as f32 / vb.width();
+    let scale_y = target_size as f32 / vb.height();
+    let scale = scale_x.min(scale_y);
+    let transform =
+        tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, -vb.x() * scale, -vb.y() * scale);
+
+    let mut pixmap =
+        tiny_skia::Pixmap::new(target_size, target_size).ok_or("failed to allocate pixmap")?;
+    let mut pixmap_ref = pixmap.as_mut();
+
+    resvg::render(&tree, transform, &mut pixmap_ref);
+
+    Icon::from_rgba(pixmap.data().to_vec(), target_size, target_size).map_err(|err| err.to_string())
+}
+
+fn fallback_icon() -> Icon {
+    // Simple fallback circle to ensure the tray is not empty if SVG rendering fails.
+    let size = 64u32;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let center = (size as f32) / 2.0;
+    let radius = center - 2.0;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
             let dist = (dx * dx + dy * dy).sqrt();
-            if dist <= 8.5 && dist >= 6.0 {
-                set_pixel(x, y, cup_color);
+            if dist <= radius {
+                let idx = ((y * size + x) * 4) as usize;
+                rgba[idx..idx + 4].copy_from_slice(&[50, 120, 220, 255]);
             }
         }
     }
-    // steam lines (staggered)
-    for (x, offset) in [(22, 0), (32, 2), (40, 4)] {
-        for y in 12..26 {
-            if (y + offset) % 4 != 0 {
-                set_pixel(x, y, steam_color);
-            }
-        }
-    }
-    // saucer
-    for x in 12..52 {
-        set_pixel(x, 47, saucer_color);
-    }
-    for x in 14..50 {
-        set_pixel(x, 48, saucer_shadow);
-    }
-
-    Icon::from_rgba(rgba, width, height).map_err(|err| err.to_string())
+    Icon::from_rgba(rgba, size, size).expect("fallback icon must be valid")
 }
