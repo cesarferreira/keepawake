@@ -1,0 +1,16 @@
+[package]
+name = "keepawake"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+cfg-if = "1.0"
+tray-icon = "0.14"
+tao = "0.26"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.57.0", features = ["Win32_System_Power"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
