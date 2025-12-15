@@ -1,10 +1,10 @@
 # keepawake
 
-Cross-platform CLI to keep your machine awake by periodically pinging native OS APIs. Runs headless or via a system tray with status + Quit.
+Cross-platform CLI to keep your machine awake by periodically pinging native OS APIs. Shows a system tray icon with status + Quit by default, or runs headless with `--no-tray`.
 
 ## Requirements
 - Rust toolchain
-- Linux: `xdg-screensaver` and (for tray mode) libappindicator/gtk runtime
+- Linux: `xdg-screensaver` and libappindicator/gtk runtime (tray is default; use `--no-tray` to skip)
 - macOS: uses `IOPMAssertionCreateWithName` and falls back to `caffeinate -du -t 60`
 - Windows: uses `SetThreadExecutionState`
 
@@ -13,17 +13,17 @@ Cross-platform CLI to keep your machine awake by periodically pinging native OS 
 # see flags
 cargo run -- --help
 
-# default: ping every 30s indefinitely
+# default: tray icon pinging every 30s indefinitely
 cargo run --
+
+# headless (no tray icon)
+cargo run -- --no-tray
 
 # custom interval/duration
 cargo run -- --interval 5 --duration 10
 
 # quiet headless
-cargo run -- --daemon
-
-# tray mode with menu (shows interval/duration/debug + Quit)
-cargo run -- --tray --interval 15 --duration 30
+cargo run -- --no-tray --daemon
 ```
 
 ## Flags
@@ -31,7 +31,8 @@ cargo run -- --tray --interval 15 --duration 30
 - `--duration <minutes>`: stop after N minutes (min: 1). Omit to run indefinitely
 - `--daemon`: suppress all output
 - `--debug`: print debug pings (suppressed in daemon mode)
-- `--tray`: show a system tray icon with status (interval, duration, debug) and a Quit item (uses libappindicator on Linux)
+- `--tray`: show a system tray icon with status (interval, duration, debug) and a Quit item (uses libappindicator on Linux). Enabled by default.
+- `--no-tray`: disable the system tray icon and run headless
 
 ## Tray mode notes
 - Icon: larger steaming cup rendered from `assets/tray.svg` / `assets/tray-animated.svg` (128px target); tooltip shows the current cadence (`every <interval>s`, optional duration).

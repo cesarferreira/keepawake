@@ -23,7 +23,11 @@ pub struct Cli {
     #[arg(long)]
     pub debug: bool,
 
-    /// Show a system tray icon while running
-    #[arg(long)]
+    /// Show a system tray icon while running (default; disable with --no-tray)
+    #[arg(long, default_value_t = true)]
     pub tray: bool,
+
+    /// Run without a system tray icon
+    #[arg(long)]
+    pub no_tray: bool,
 }

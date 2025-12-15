@@ -11,7 +11,9 @@ use std::{
 fn main() {
     let args = cli::Cli::parse();
 
-    if args.tray {
+    let use_tray = if args.no_tray { false } else { args.tray };
+
+    if use_tray {
         tray::run_with_tray(args);
     }
 
