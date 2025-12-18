@@ -30,4 +30,12 @@ pub struct Cli {
     /// Run without a system tray icon
     #[arg(long)]
     pub no_tray: bool,
+
+    /// Daily active window, e.g. "9am-5pm" or "21:30-06:00"
+    #[arg(
+        long,
+        value_name = "START-END",
+        help = "Daily active window, e.g. \"9am-5pm\" or \"21:30-06:00\""
+    )]
+    pub active_window: Option<String>,
 }
