@@ -19,6 +19,7 @@ build:
 bundle: build
 	@mkdir -p $(MACOS_DIR) $(RESOURCES)
 	@cp target/release/$(BINARY) $(MACOS_DIR)/$(BINARY)
+	@cp assets/AppIcon.icns $(RESOURCES)/AppIcon.icns
 	@sed -e 's/$${BUNDLE_ID}/$(BUNDLE_ID)/' \
 	     -e 's/$${APP_NAME}/$(APP_NAME)/' \
 	     -e 's/$${VERSION}/$(VERSION)/' \
@@ -27,7 +28,10 @@ bundle: build
 
 ## Install to /Applications (may need sudo)
 install: bundle
+	@rm -rf $(INSTALL_DIR)/$(APP_DIR)
 	@cp -r $(APP_DIR) $(INSTALL_DIR)/$(APP_DIR)
+	@touch $(INSTALL_DIR)/$(APP_DIR)
+	@killall Finder 2>/dev/null || true
 	@echo "Installed to $(INSTALL_DIR)/$(APP_DIR)"
 
 ## Remove from /Applications
