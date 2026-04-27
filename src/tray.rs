@@ -579,8 +579,7 @@ fn render_svg_frame(steam_offset: f32, steam_opacity: f32) -> Result<Icon, Strin
 
 fn render_svg_to_icon(svg: &str, target_size: u32) -> Result<Icon, String> {
     let options = usvg::Options::default();
-    let mut fontdb = usvg::fontdb::Database::new();
-    fontdb.load_system_fonts();
+    let fontdb = usvg::fontdb::Database::new();
 
     let tree = usvg::Tree::from_str(svg, &options, &fontdb)
         .map_err(|err| format!("failed to parse tray svg: {err}"))?;
