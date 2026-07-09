@@ -1,11 +1,14 @@
 use crate::{
     cli::Cli,
     platform,
+    runtime::{AwakeControl, ReconcileOutcome},
     schedule::{DailyWindow, ScheduleStatus},
 };
 use chrono::{Local, Timelike};
-use resvg::{tiny_skia, usvg};
-use std::time::{Duration, Instant, SystemTime};
+use std::{
+    io::Cursor,
+    time::{Duration, Instant, SystemTime},
+};
 use tao::{
     event::{Event, StartCause},
     event_loop::{ControlFlow, EventLoopBuilder},
@@ -15,7 +18,7 @@ use tray_icon::{
     menu::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
 };
 
-const STATUS_REFRESH: Duration = Duration::from_secs(30);
+const STATUS_REFRESH: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActivationPlan {
@@ -49,13 +52,11 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
         .duration
         .map(|minutes| Duration::from_secs(minutes * 60));
     let start = Instant::now();
-    let mut next_ping = start;
-    let steam_interval = Duration::from_secs(2);
-    let mut next_steam: Option<Instant> = None;
-    let mut steam_frame = 0usize;
-    let mut next_status_refresh = start;
+    let mut next_platform_refresh = start;
+    let mut next_status_refresh = start + STATUS_REFRESH;
     let has_schedule = active_window.is_some();
-    let mut status_dirty = true;
+    let mut last_until_hour = None;
+    let mut controller = platform::new_controller();
 
     let mut plan = if let Some(limit) = duration_limit {
         ActivationPlan::ManualTimed { end: start + limit }
@@ -116,12 +117,7 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
         (120, "2 hours"),
         (300, "5 hours"),
     ] {
-        let item = MenuItem::with_id(
-            format!("activate_{minutes}m"),
-            label.to_string(),
-            true,
-            None,
-        );
+        let item = MenuItem::with_id(format!("activate_{minutes}m"), label, true, None);
         activation_choices.push((
             item,
             ActivationChoice::Timed(Duration::from_secs(minutes * 60)),
@@ -129,7 +125,7 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
     }
 
     let until_start_index = activation_choices.len();
-    let current_hour = Local::now().hour() as u32;
+    let current_hour = Local::now().hour();
     if current_hour < 23 {
         for hour in current_hour + 1..24 {
             let minutes = hour * 60;
@@ -148,10 +144,10 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
         activation_refs.push(item as &dyn IsMenuItem);
     }
     let activate_menu = Submenu::with_id("activate_for", "Activate for", true);
-    if let Err(err) = activate_menu.append_items(&activation_refs) {
-        if !args.daemon {
-            eprintln!("failed to build Activate for submenu: {err}");
-        }
+    if let Err(err) = activate_menu.append_items(&activation_refs)
+        && !args.daemon
+    {
+        eprintln!("failed to build Activate for submenu: {err}");
     }
 
     if let Err(err) = menu.append_items(&[
@@ -164,25 +160,21 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
         &pause_item,
         &separator2,
         &quit_item,
-    ]) {
-        if !args.daemon {
-            eprintln!("failed to build tray menu: {err}");
-        }
+    ]) && !args.daemon
+    {
+        eprintln!("failed to build tray menu: {err}");
     }
 
     let mut tray_icon: Option<TrayIcon> = None;
-    let icon_frames = match build_icon_frames() {
-        Ok(frames) => frames,
+    let icon = match load_static_icon() {
+        Ok(icon) => icon,
         Err(err) => {
             if !args.daemon {
-                eprintln!("Warning: failed to build tray icon: {err}; using fallback.");
+                eprintln!("Warning: failed to load tray icon: {err}; using fallback.");
             }
-            vec![fallback_icon()]
+            fallback_icon()
         }
     };
-    if icon_frames.len() > 1 {
-        next_steam = Some(start + steam_interval);
-    }
 
     if !args.daemon {
         let duration_msg = match args.duration {
@@ -198,21 +190,26 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
         );
     }
 
-    let mut status_details = compute_status(&mut plan, active_window.as_ref(), start, Local::now());
-    status_item.set_text(&status_details.label);
-    pause_item.set_text(match plan {
+    let initial_status = compute_status(&mut plan, active_window.as_ref(), start, Local::now());
+    let mut rendered_label = initial_status.label.clone();
+    let mut rendered_pause = match plan {
         ActivationPlan::ManualOff => "Resume now",
         _ => "Pause now",
-    });
+    }
+    .to_string();
+    let mut rendered_tooltip = format!("keepawake: {}", initial_status.label);
+    let mut rendered_title = title_with_spacing(&initial_status.title);
+    status_item.set_text(&rendered_label);
+    pause_item.set_text(&rendered_pause);
 
     event_loop.run(move |event, _, control_flow| match event {
         Event::NewEvents(StartCause::Init) => {
             if tray_icon.is_none() {
                 match build_tray_icon(
-                    format!("keepawake: {}", status_details.label),
-                    Some(title_with_spacing(&status_details.title)),
+                    rendered_tooltip.clone(),
+                    Some(rendered_title.clone()),
                     &menu,
-                    icon_frames[0].clone(),
+                    icon.clone(),
                 ) {
                     Ok(icon) => {
                         tray_icon = Some(icon);
@@ -228,7 +225,6 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
                             eprintln!("Warning: failed to create tray icon: {err}");
                         }
                         *control_flow = ControlFlow::Exit;
-                        return;
                     }
                 }
             }
@@ -238,9 +234,11 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
             let now_local = Local::now();
             let now_minutes = now_local.hour() * 60 + now_local.minute();
 
-            for (item, minutes) in until_choices.iter() {
-                let enabled = *minutes > now_minutes;
-                item.set_enabled(enabled);
+            if last_until_hour != Some(now_local.hour()) {
+                for (item, minutes) in &until_choices {
+                    item.set_enabled(*minutes > now_minutes);
+                }
+                last_until_hour = Some(now_local.hour());
             }
 
             while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -260,7 +258,6 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
                         }
                         _ => ActivationPlan::ManualOff,
                     };
-                    status_dirty = true;
                     continue;
                 }
 
@@ -285,80 +282,93 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
                             }
                         }
                     };
-                    status_dirty = true;
                     break;
                 }
             }
 
-            if let Some(limit) = duration_limit {
-                if now.duration_since(start) >= limit {
-                    *control_flow = ControlFlow::Exit;
-                    return;
+            if duration_limit.is_some_and(|limit| now.duration_since(start) >= limit) {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+
+            let status_details = compute_status(&mut plan, active_window.as_ref(), now, now_local);
+
+            let refresh_due =
+                controller.requires_periodic_refresh() && now >= next_platform_refresh;
+            let reconcile = crate::runtime::reconcile_awake(
+                &mut controller,
+                status_details.active,
+                refresh_due,
+            );
+            match &reconcile {
+                Ok(ReconcileOutcome::StateChanged) if args.debug && !args.daemon => {
+                    println!(
+                        "keepawake {} at {:?}",
+                        if status_details.active {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        SystemTime::now()
+                    );
                 }
-            }
-
-            if let Some(steam_tick) = next_steam {
-                if now >= steam_tick && icon_frames.len() > 1 {
-                    steam_frame = (steam_frame + 1) % icon_frames.len();
-                    if let Some(tray) = tray_icon.as_ref() {
-                        if let Err(err) = tray.set_icon(Some(icon_frames[steam_frame].clone())) {
-                            if !args.daemon {
-                                eprintln!("Warning: failed to update tray icon: {err}");
-                            }
-                        }
-                    }
-                    next_steam = Some(now + steam_interval);
+                Ok(ReconcileOutcome::Refreshed) if args.debug && !args.daemon => {
+                    println!("keepawake refresh at {:?}", SystemTime::now());
                 }
+                Err(err) if !args.daemon => eprintln!("Warning: {err}"),
+                _ => {}
+            }
+            if controller.requires_periodic_refresh()
+                && (refresh_due || matches!(reconcile, Ok(ReconcileOutcome::StateChanged)))
+            {
+                next_platform_refresh = now + interval;
             }
 
-            let previous_plan = plan;
-            status_details = compute_status(&mut plan, active_window.as_ref(), now, now_local);
-            if plan != previous_plan {
-                status_dirty = true;
-            }
-
-            if status_details.active && now >= next_ping {
-                match platform::keep_awake() {
-                    Ok(_) => {
-                        if args.debug && !args.daemon {
-                            println!("keepawake ping at {:?}", SystemTime::now());
-                        }
-                    }
-                    Err(err) => {
-                        if !args.daemon {
-                            eprintln!("Warning: {err}");
-                        }
-                    }
-                }
-                next_ping = now + interval;
-            } else if now >= next_ping {
-                next_ping = now + interval;
-            }
-
-            if status_dirty || now >= next_status_refresh {
+            if status_details.label != rendered_label {
                 status_item.set_text(&status_details.label);
-                pause_item.set_text(match plan {
-                    ActivationPlan::ManualOff => "Resume now",
-                    _ => "Pause now",
-                });
+                rendered_label.clone_from(&status_details.label);
+            }
 
-                if let Some(tray) = tray_icon.as_ref() {
-                    let _ = tray.set_tooltip(Some(format!("keepawake: {}", status_details.label)));
-                    let _ = tray.set_title(Some(title_with_spacing(&status_details.title)));
+            let pause_text = match plan {
+                ActivationPlan::ManualOff => "Resume now",
+                _ => "Pause now",
+            };
+            if pause_text != rendered_pause {
+                pause_item.set_text(pause_text);
+                pause_text.clone_into(&mut rendered_pause);
+            }
+
+            if let Some(tray) = tray_icon.as_ref() {
+                let tooltip = format!("keepawake: {}", status_details.label);
+                if tooltip != rendered_tooltip {
+                    if let Err(err) = tray.set_tooltip(Some(&tooltip))
+                        && !args.daemon
+                    {
+                        eprintln!("Warning: failed to update tray tooltip: {err}");
+                    }
+                    rendered_tooltip = tooltip;
                 }
 
-                status_dirty = false;
+                let title = title_with_spacing(&status_details.title);
+                if title != rendered_title {
+                    tray.set_title(Some(&title));
+                    rendered_title = title;
+                }
+            }
+
+            if now >= next_status_refresh {
                 next_status_refresh = now + STATUS_REFRESH;
             }
 
             let mut next_wake = next_status_refresh;
-            if let Some(steam_tick) = next_steam {
-                if steam_tick < next_wake {
-                    next_wake = steam_tick;
-                }
+            if controller.requires_periodic_refresh() && next_platform_refresh < next_wake {
+                next_wake = next_platform_refresh;
             }
-            if status_details.active && next_ping < next_wake {
-                next_wake = next_ping;
+            if controller.is_active() != status_details.active {
+                let retry = now + interval;
+                if retry < next_wake {
+                    next_wake = retry;
+                }
             }
             if let Some(remaining) = status_details.remaining {
                 let end_tick = now + remaining;
@@ -375,10 +385,8 @@ pub fn run_with_tray(args: Cli, active_window: Option<DailyWindow>) -> ! {
 
             *control_flow = ControlFlow::WaitUntil(next_wake);
         }
-        Event::LoopDestroyed => {
-            if !args.daemon {
-                println!("keepawake exiting after {:?}", start.elapsed());
-            }
+        Event::LoopDestroyed if !args.daemon => {
+            println!("keepawake exiting after {:?}", start.elapsed());
         }
         _ => {}
     })
@@ -390,14 +398,14 @@ fn compute_status(
     now: Instant,
     now_local: chrono::DateTime<Local>,
 ) -> StatusDetails {
-    if let ActivationPlan::ManualTimed { end } = plan {
-        if now >= *end {
-            *plan = if schedule.is_some() {
-                ActivationPlan::FollowSchedule
-            } else {
-                ActivationPlan::ManualOff
-            };
-        }
+    if let ActivationPlan::ManualTimed { end } = plan
+        && now >= *end
+    {
+        *plan = if schedule.is_some() {
+            ActivationPlan::FollowSchedule
+        } else {
+            ActivationPlan::ManualOff
+        };
     }
 
     let mut active = false;
@@ -434,8 +442,10 @@ fn compute_status(
         if let ActivationPlan::ManualTimed { .. } = plan {
             let text = format_remaining(remaining.unwrap_or_else(|| Duration::from_secs(0)));
             (format!("Active — {text} left"), format!("{text} left"))
-        } else if matches!(plan, ActivationPlan::FollowSchedule) && remaining.is_some() {
-            let text = format_remaining(remaining.unwrap());
+        } else if matches!(plan, ActivationPlan::FollowSchedule)
+            && let Some(remaining) = remaining
+        {
+            let text = format_remaining(remaining);
             (format!("Active — {text} left in window"), text)
         } else {
             (
@@ -523,6 +533,7 @@ fn build_tray_icon(
 ) -> Result<TrayIcon, String> {
     let mut builder = TrayIconBuilder::new()
         .with_icon(icon)
+        .with_icon_as_template(cfg!(target_os = "macos"))
         .with_tooltip(tooltip)
         .with_menu(Box::new(menu.clone()));
 
@@ -533,75 +544,34 @@ fn build_tray_icon(
     builder.build().map_err(|err| err.to_string())
 }
 
-fn build_icon_frames() -> Result<Vec<Icon>, String> {
-    let steam_frames = [
-        (3.0f32, 0.10f32),
-        (1.5f32, 0.55f32),
-        (0.0f32, 0.90f32),
-        (-1.5f32, 0.55f32),
-    ];
+fn load_static_icon() -> Result<Icon, String> {
+    let mut decoder =
+        png::Decoder::new(Cursor::new(include_bytes!("../assets/tray.png").as_slice()));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| format!("failed to read embedded tray PNG: {err}"))?;
+    let output_size = reader
+        .output_buffer_size()
+        .ok_or("embedded tray PNG is too large to decode")?;
+    let mut rgba = vec![0; output_size];
+    let info = reader
+        .next_frame(&mut rgba)
+        .map_err(|err| format!("failed to decode embedded tray PNG: {err}"))?;
 
-    let mut frames = Vec::with_capacity(steam_frames.len());
-    for (offset, opacity) in steam_frames {
-        frames.push(render_svg_frame(offset, opacity)?);
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return Err(format!(
+            "embedded tray PNG decoded as {:?}/{:?}, expected RGBA/8-bit",
+            info.color_type, info.bit_depth
+        ));
     }
 
-    Ok(frames)
-}
-
-fn render_svg_frame(steam_offset: f32, steam_opacity: f32) -> Result<Icon, String> {
-    const ICON_PX: u32 = 128;
-    // These paths come from tray.svg (cup and handle) and tray-animated.svg (steam), scaled via viewBox.
-    let steam = |x: u8| -> String {
-        format!(
-            r#"<path d="M{} {:.2}v6" stroke-opacity="{:.2}" />"#,
-            x,
-            8.0f32 - steam_offset,
-            steam_opacity
-        )
-    };
-
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#f4f7ff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
-  {steam1}
-  {steam2}
-  {steam3}
-  <path d="M19 11H5v5a7 7 0 0 0 14 0v-5Z" />
-  <path d="M19 13h1a2 2 0 0 1 0 4h-1" />
-</svg>"##,
-        steam1 = steam(8),
-        steam2 = steam(12),
-        steam3 = steam(16),
-    );
-
-    render_svg_to_icon(&svg, ICON_PX)
-}
-
-fn render_svg_to_icon(svg: &str, target_size: u32) -> Result<Icon, String> {
-    let options = usvg::Options::default();
-    let fontdb = usvg::fontdb::Database::new();
-
-    let tree = usvg::Tree::from_str(svg, &options, &fontdb)
-        .map_err(|err| format!("failed to parse tray svg: {err}"))?;
-
-    let vb = tree.view_box().rect;
-    let scale_x = target_size as f32 / vb.width();
-    let scale_y = target_size as f32 / vb.height();
-    let scale = scale_x.min(scale_y);
-    let transform =
-        tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, -vb.x() * scale, -vb.y() * scale);
-
-    let mut pixmap =
-        tiny_skia::Pixmap::new(target_size, target_size).ok_or("failed to allocate pixmap")?;
-    let mut pixmap_ref = pixmap.as_mut();
-
-    resvg::render(&tree, transform, &mut pixmap_ref);
-
-    Icon::from_rgba(pixmap.data().to_vec(), target_size, target_size).map_err(|err| err.to_string())
+    rgba.truncate(info.buffer_size());
+    Icon::from_rgba(rgba, info.width, info.height).map_err(|err| err.to_string())
 }
 
 fn fallback_icon() -> Icon {
-    // Simple fallback circle to ensure the tray is not empty if SVG rendering fails.
+    // Simple fallback circle to ensure the tray is not empty if the embedded PNG is invalid.
     let size = 64u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let center = (size as f32) / 2.0;
@@ -618,4 +588,40 @@ fn fallback_icon() -> Icon {
         }
     }
     Icon::from_rgba(rgba, size, size).expect("fallback icon must be valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActivationPlan, compute_status, load_static_icon};
+    use crate::schedule::DailyWindow;
+    use chrono::Local;
+    use std::time::Instant;
+
+    #[test]
+    fn embedded_static_icon_decodes() {
+        assert!(load_static_icon().is_ok());
+    }
+
+    #[test]
+    fn expired_manual_activation_turns_off_without_schedule() {
+        let now = Instant::now();
+        let mut plan = ActivationPlan::ManualTimed { end: now };
+
+        let status = compute_status(&mut plan, None, now, Local::now());
+
+        assert_eq!(plan, ActivationPlan::ManualOff);
+        assert!(!status.active);
+    }
+
+    #[test]
+    fn expired_manual_activation_returns_to_schedule() {
+        let now = Instant::now();
+        let schedule = DailyWindow::parse("00:00-00:00").unwrap();
+        let mut plan = ActivationPlan::ManualTimed { end: now };
+
+        let status = compute_status(&mut plan, Some(&schedule), now, Local::now());
+
+        assert_eq!(plan, ActivationPlan::FollowSchedule);
+        assert!(status.active);
+    }
 }

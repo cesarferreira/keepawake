@@ -7,7 +7,7 @@ use clap::Parser;
     version
 )]
 pub struct Cli {
-    /// Call keep-awake every N seconds
+    /// Refresh keep-awake state every N seconds on platforms that require it
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
     pub interval: u64,
 

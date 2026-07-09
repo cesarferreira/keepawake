@@ -1,9 +1,9 @@
+use super::controller::Backend;
 use std::{
     ffi::CString,
     os::raw::{c_char, c_void},
     process::{Child, Command, Stdio},
     ptr,
-    sync::{Mutex, OnceLock},
 };
 
 type CFStringRef = *const c_void;
@@ -15,9 +15,6 @@ type IOReturn = i32;
 const K_CFSTRING_ENCODING_UTF8: CFStringEncoding = 0x0800_0100;
 const K_IOPMASSERTION_LEVEL_ON: IOPMAssertionLevel = 255;
 
-static ASSERTION_SLOT: OnceLock<Mutex<Option<IOPMAssertionID>>> = OnceLock::new();
-static CAFFEINATE_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
-
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
     fn IOPMAssertionCreateWithName(
@@ -26,6 +23,7 @@ unsafe extern "C" {
         assertion_name: CFStringRef,
         assertion_id: *mut IOPMAssertionID,
     ) -> IOReturn;
+    fn IOPMAssertionRelease(assertion_id: IOPMAssertionID) -> IOReturn;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -38,42 +36,107 @@ unsafe extern "C" {
     fn CFRelease(cf: CFStringRef);
 }
 
-fn assertion_storage() -> &'static Mutex<Option<IOPMAssertionID>> {
-    ASSERTION_SLOT.get_or_init(|| Mutex::new(None))
+pub(crate) struct PlatformBackend {
+    assertion: Option<IOPMAssertionID>,
+    caffeinate: Option<Child>,
 }
 
-fn caffeinate_storage() -> &'static Mutex<Option<Child>> {
-    CAFFEINATE_CHILD.get_or_init(|| Mutex::new(None))
-}
-
-pub fn keep_awake() -> Result<(), String> {
-    {
-        let mut guard = assertion_storage()
-            .lock()
-            .map_err(|_| "failed to lock assertion storage".to_string())?;
-
-        if guard.is_none() {
-            match create_assertion() {
-                Ok(id) => {
-                    *guard = Some(id);
-                    return Ok(());
-                }
-                Err(err) => {
-                    drop(guard);
-                    return ensure_caffeinate_running().map_err(|fallback| {
-                        format!("{err}; fallback caffeinate failed: {fallback}")
-                    });
-                }
-            }
+impl PlatformBackend {
+    pub(crate) fn new() -> Self {
+        Self {
+            assertion: None,
+            caffeinate: None,
         }
     }
 
-    Ok(())
+    fn start_caffeinate(&mut self) -> Result<(), String> {
+        let child = Command::new("caffeinate")
+            .arg("-d")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("failed to spawn caffeinate: {err}"))?;
+        self.caffeinate = Some(child);
+        Ok(())
+    }
+
+    fn stop_caffeinate(&mut self) -> Result<(), String> {
+        let Some(mut child) = self.caffeinate.take() else {
+            return Ok(());
+        };
+
+        if child
+            .try_wait()
+            .map_err(|err| format!("caffeinate status check failed: {err}"))?
+            .is_none()
+        {
+            child
+                .kill()
+                .map_err(|err| format!("failed to stop caffeinate: {err}"))?;
+        }
+        child
+            .wait()
+            .map(|_| ())
+            .map_err(|err| format!("failed to reap caffeinate: {err}"))
+    }
+}
+
+impl Backend for PlatformBackend {
+    fn activate(&mut self) -> Result<(), String> {
+        match create_assertion() {
+            Ok(id) => {
+                self.assertion = Some(id);
+                Ok(())
+            }
+            Err(assertion_error) => self.start_caffeinate().map_err(|fallback_error| {
+                format!("{assertion_error}; fallback caffeinate failed: {fallback_error}")
+            }),
+        }
+    }
+
+    fn deactivate(&mut self) -> Result<(), String> {
+        let assertion_error = self.assertion.take().and_then(|id| {
+            let result = unsafe { IOPMAssertionRelease(id) };
+            (result != 0).then(|| format!("IOPMAssertionRelease returned {result}"))
+        });
+        let caffeinate_error = self.stop_caffeinate().err();
+
+        match (assertion_error, caffeinate_error) {
+            (None, None) => Ok(()),
+            (Some(err), None) | (None, Some(err)) => Err(err),
+            (Some(assertion), Some(caffeinate)) => Err(format!("{assertion}; {caffeinate}")),
+        }
+    }
+
+    fn refresh(&mut self) -> Result<(), String> {
+        let Some(child) = self.caffeinate.as_mut() else {
+            return Ok(());
+        };
+
+        match child.try_wait() {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => {
+                self.caffeinate = None;
+                self.start_caffeinate()
+            }
+            Err(err) => Err(format!("caffeinate status check failed: {err}")),
+        }
+    }
+
+    fn requires_periodic_refresh(&self) -> bool {
+        self.caffeinate.is_some()
+    }
 }
 
 fn create_assertion() -> Result<IOPMAssertionID, String> {
     let assertion_type = cfstring("NoDisplaySleepAssertion")?;
-    let assertion_name = cfstring("keepawake")?;
+    let assertion_name = match cfstring("keepawake") {
+        Ok(value) => value,
+        Err(err) => {
+            unsafe { CFRelease(assertion_type) };
+            return Err(err);
+        }
+    };
 
     let mut id: IOPMAssertionID = 0;
     let result = unsafe {
@@ -95,39 +158,6 @@ fn create_assertion() -> Result<IOPMAssertionID, String> {
     } else {
         Err(format!("IOPMAssertionCreateWithName returned {result}"))
     }
-}
-
-fn ensure_caffeinate_running() -> Result<(), String> {
-    let mut slot = caffeinate_storage()
-        .lock()
-        .map_err(|_| "failed to lock caffeinate storage".to_string())?;
-
-    let mut should_spawn = true;
-    if let Some(child) = slot.as_mut() {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                *slot = None;
-            }
-            Ok(None) => {
-                should_spawn = false;
-            }
-            Err(err) => {
-                return Err(format!("caffeinate status check failed: {err}"));
-            }
-        }
-    }
-
-    if should_spawn {
-        let child = Command::new("caffeinate")
-            .args(["-du", "-t", "60"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| format!("failed to spawn caffeinate: {err}"))?;
-        *slot = Some(child);
-    }
-
-    Ok(())
 }
 
 fn cfstring(value: &str) -> Result<CFStringRef, String> {
