@@ -4,9 +4,9 @@
 
 **Goal:** Replace KeepAwake’s current blue-and-teal mug icon with the approved premium graphite-and-amber “ember wake” icon and ensure macOS displays the new bundled asset.
 
-**Architecture:** Generate one reviewed 1024 × 1024 master PNG, derive the standard macOS iconset from that master with `sips`, and compile it into the existing `AppIcon.icns` bundle resource with `iconutil`. Preserve the current Makefile bundling contract, then verify both asset hashes and the icon Finder resolves from the installed application.
+**Architecture:** Replace the editable SVG source, render one reviewed 1024 × 1024 master PNG with `rsvg-convert`, derive the standard macOS iconset from that master with `sips`, and compile it into the existing `AppIcon.icns` bundle resource with `iconutil`. Preserve the current Makefile bundling contract, then verify both asset hashes and the icon Finder resolves from the installed application.
 
-**Tech Stack:** OpenAI image generation, PNG, macOS `sips`, `iconutil`, Make, shell verification
+**Tech Stack:** SVG, `rsvg-convert`, PNG, macOS `sips`, `iconutil`, Make, shell verification
 
 ## Global Constraints
 
@@ -20,16 +20,16 @@
 ### Task 1: Create and review the master icon
 
 **Files:**
+- Modify: `assets/app-icon.svg`
 - Create: `assets/app-icon.png`
-- Delete: `assets/app-icon.svg`
 
 **Interfaces:**
 - Consumes: the approved “ember wake” visual direction
-- Produces: a square 1024 × 1024 RGBA PNG used as the only rasterization source
+- Produces: an editable vector source and a square 1024 × 1024 RGBA PNG used for iconset rasterization
 
-- [ ] **Step 1: Generate the source artwork**
+- [ ] **Step 1: Replace the source artwork**
 
-Use the built-in image-generation tool with this prompt:
+Replace `assets/app-icon.svg` with a vector-native icon matching this brief:
 
 ```text
 Use case: logo-brand
@@ -44,7 +44,11 @@ Constraints: exactly one cup and exactly one steam-spark; no words, letters, num
 Avoid: blue, teal, cyan, purple gradients; three steam lines; saucer; tiny details; clip-art appearance; generic emoji styling; excessive glow
 ```
 
-Save the selected result as `assets/app-icon.png` and remove the obsolete `assets/app-icon.svg` so the repository has no stale source for the previous artwork.
+Render the raster master:
+
+```bash
+rsvg-convert -w 1024 -h 1024 assets/app-icon.svg -o assets/app-icon.png
+```
 
 - [ ] **Step 2: Validate source dimensions and appearance**
 
@@ -59,7 +63,7 @@ Expected: `pixelWidth: 1024`, `pixelHeight: 1024`, and `hasAlpha: yes`. Inspect 
 - [ ] **Step 3: Commit the reviewed source**
 
 ```bash
-git add assets/app-icon.png assets/app-icon.svg
+git add assets/app-icon.svg assets/app-icon.png
 git commit -m "design: replace macOS app icon artwork"
 ```
 
