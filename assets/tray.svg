@@ -1,12 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <!-- Steam Lines -->
-  <path d="M8 2v4" />
-  <path d="M12 2v4" />
-  <path d="M16 2v4" />
-  
-  <!-- Cup Body -->
-  <path d="M19 11H5v5a7 7 0 0 0 14 0v-5Z" />
-  
-  <!-- Cup Handle -->
-  <path d="M19 13h1a2 2 0 0 1 0 4h-1" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <g stroke="#f4f7ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 10h12v5a5 5 0 0 1-5 5h-2a5 5 0 0 1-5-5v-5Z" />
+    <path d="M17 12h1.5a2.5 2.5 0 0 1 0 5H17" />
+    <path d="M8 7c-1-1-1-2 0-3" />
+  </g>
+  <path fill="#f4f7ff" d="m13 1 .55 1.45L15 3l-1.45.55L13 5l-.55-1.45L11 3l1.45-.55L13 1Z" />
 </svg>

@@ -1,9 +1,11 @@
 mod cli;
 mod platform;
+mod runtime;
 mod schedule;
 mod tray;
 
 use clap::Parser;
+use runtime::{AwakeControl, ReconcileOutcome};
 use schedule::ScheduleStatus;
 use std::{
     env, process, thread,
@@ -53,13 +55,14 @@ fn main() {
     }
 
     let start = Instant::now();
+    let mut controller = platform::new_controller();
+    let mut next_refresh = start;
 
     loop {
-        let elapsed = start.elapsed();
-        if let Some(limit) = duration_limit {
-            if elapsed >= limit {
-                break;
-            }
+        let now = Instant::now();
+        let elapsed = now.duration_since(start);
+        if duration_limit.is_some_and(|limit| elapsed >= limit) {
+            break;
         }
 
         let schedule_state = active_window
@@ -70,58 +73,66 @@ fn main() {
             .map(|state| matches!(state, ScheduleStatus::Active { .. }))
             .unwrap_or(true);
 
-        if schedule_active {
-            match platform::keep_awake() {
-                Ok(_) => {
-                    if args.debug && !args.daemon {
-                        println!("keepawake ping at {:?}", SystemTime::now());
-                    }
-                }
-                Err(err) => {
-                    if !args.daemon {
-                        eprintln!("Warning: {err}");
-                    }
+        let refresh_due = controller.requires_periodic_refresh() && now >= next_refresh;
+        let outcome = runtime::reconcile_awake(&mut controller, schedule_active, refresh_due);
+        let sync_failed = outcome.is_err();
+        let state_changed = matches!(&outcome, Ok(ReconcileOutcome::StateChanged));
+
+        match outcome {
+            Ok(ReconcileOutcome::StateChanged) => {
+                if args.debug && !args.daemon {
+                    println!(
+                        "keepawake {} at {:?}",
+                        if schedule_active {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        SystemTime::now()
+                    );
                 }
             }
-        } else if args.debug && !args.daemon {
-            println!(
-                "keepawake idle (outside active window) at {:?}",
-                SystemTime::now()
-            );
+            Ok(ReconcileOutcome::Refreshed) => {
+                if args.debug && !args.daemon {
+                    println!("keepawake refresh at {:?}", SystemTime::now());
+                }
+            }
+            Ok(ReconcileOutcome::Unchanged) => {}
+            Err(err) => {
+                if !args.daemon {
+                    eprintln!("Warning: {err}");
+                }
+            }
         }
 
-        let mut sleep_for = match duration_limit {
-            Some(limit) => {
-                let elapsed = start.elapsed();
-                if elapsed >= limit {
-                    break;
-                }
+        if controller.requires_periodic_refresh() && (refresh_due || state_changed) {
+            next_refresh = now + interval;
+        }
 
-                let remaining = limit - elapsed;
-                if remaining < interval {
-                    remaining
-                } else {
-                    interval
-                }
-            }
-            None => interval,
+        let duration_delay = duration_limit.map(|limit| limit.saturating_sub(elapsed));
+        let schedule_delay = schedule_state.map(|state| match state {
+            ScheduleStatus::Active { remaining } => remaining,
+            ScheduleStatus::Inactive { starts_in } => starts_in,
+        });
+        let refresh_delay = (controller.is_active() && controller.requires_periodic_refresh())
+            .then(|| next_refresh.saturating_duration_since(now));
+        let retry_delay =
+            (sync_failed || schedule_active != controller.is_active()).then_some(interval);
+
+        let sleep_for =
+            runtime::minimum_delay(&[duration_delay, schedule_delay, refresh_delay, retry_delay]);
+
+        match sleep_for {
+            Some(delay) if delay.is_zero() => thread::sleep(Duration::from_millis(250)),
+            Some(delay) => thread::sleep(delay),
+            None => thread::park(),
         };
+    }
 
-        if let Some(state) = schedule_state {
-            let until_change = match state {
-                ScheduleStatus::Active { remaining } => remaining,
-                ScheduleStatus::Inactive { starts_in } => starts_in,
-            };
-            if until_change < sleep_for {
-                sleep_for = until_change;
-            }
-        }
-
-        if sleep_for.is_zero() {
-            sleep_for = Duration::from_millis(250);
-        }
-
-        thread::sleep(sleep_for);
+    if let Err(err) = controller.set_active(false)
+        && !args.daemon
+    {
+        eprintln!("Warning: failed to release keep-awake state: {err}");
     }
 
     if !args.daemon {

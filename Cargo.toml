@@ -5,10 +5,9 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-cfg-if = "1.0"
-tray-icon = "0.14"
+tray-icon = "0.24.1"
 tao = "0.26"
-resvg = "0.41"
+png = "0.18"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(windows)'.dependencies]

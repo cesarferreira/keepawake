@@ -1,11 +1,11 @@
 # keepawake
 
-Cross-platform CLI to keep your machine awake by periodically pinging native OS APIs. Shows a system tray icon with status + Quit by default, or runs headless with `--no-tray`.
+Cross-platform CLI that manages native OS keep-awake state. Shows a system tray icon with status + Quit by default, or runs headless with `--no-tray`.
 
 ## Requirements
 - Rust toolchain
 - Linux: `xdg-screensaver` and libappindicator/gtk runtime (tray is default; use `--no-tray` to skip)
-- macOS: uses `IOPMAssertionCreateWithName` and falls back to `caffeinate -du -t 60`
+- macOS: uses `IOPMAssertionCreateWithName` and falls back to a managed `caffeinate -d` process
 - Windows: uses `SetThreadExecutionState`
 
 ## Quick start
@@ -13,7 +13,7 @@ Cross-platform CLI to keep your machine awake by periodically pinging native OS 
 # see flags
 cargo run -- --help
 
-# default: tray icon pinging every 30s indefinitely
+# default: tray icon, keeping awake indefinitely
 cargo run --
 
 # headless (no tray icon)
@@ -30,7 +30,7 @@ cargo run -- --no-tray --daemon
 ```
 
 ## Flags
-- `--interval <seconds>`: call keep-awake every N seconds (default: 30, min: 1)
+- `--interval <seconds>`: refresh interval on platforms that require periodic keep-awake signals (default: 30, min: 1)
 - `--duration <minutes>`: stop after N minutes (min: 1). Omit to run indefinitely
 - `--active-window <start-end>`: daily window to stay awake, e.g. `9am-5pm` or `21:00-06:00`
 - `--daemon`: suppress all output
@@ -39,14 +39,13 @@ cargo run -- --no-tray --daemon
 - `--no-tray`: disable the system tray icon and run headless
 
 ## Tray mode notes
-- Icon: larger steaming cup rendered from `assets/tray.svg` / `assets/tray-animated.svg` (128px target); tooltip/title reflect the current remaining time (e.g. `14min left`, `3h50 left`).
+- Icon: static wake-spark mug sourced from `assets/tray.svg` and embedded as a pre-rendered 64px PNG; macOS renders it as a template icon. Tooltip/title reflect the current remaining time (e.g. `14min left`, `3h50 left`).
 - Menu items: status rows (interval, daily window, debug), an `Activate for` submenu (until stopped or quick durations), a pause/resume toggle, and Quit. If a daily window is configured the menu also offers “Follow daily window”.
-- Icon steam animates every ~2 seconds (using the animated SVG as reference).
 - On Linux, the icon may be hidden without libappindicator/gtk or if the desktop shell suppresses tray icons.
 
 ### Customizing the tray icon
-- `assets/tray.svg` / `assets/tray-animated.svg` in the repo match the rendered icon (24x24 viewBox, stroked cup + steam). The app rasterizes that shape to 128px and animates the steam.
-- If you change the SVG geometry, update `build_icon_frames` in `src/tray.rs` to match your steam offsets. If SVG parsing fails, a simple fallback dot icon is used and a warning is printed (non-daemon).
+- `assets/tray.svg` is the editable 24x24 source; `assets/tray.png` is the embedded 64px runtime asset.
+- After changing the SVG, regenerate the PNG with `rsvg-convert -w 64 -h 64 -o assets/tray.png assets/tray.svg`.
 
 ## Build
 ```
